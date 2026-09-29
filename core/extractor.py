@@ -1,0 +1,145 @@
+import re
+import html
+import json
+import time
+from typing import Dict, Any, Optional
+import requests
+
+class ArticleExtractor:
+    """微信公众号单篇文章元数据提取器"""
+
+    DEFAULT_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+    def __init__(self, timeout: int = 15):
+        self.session = requests.Session()
+        self.session.headers.update(self.DEFAULT_HEADERS)
+        self.timeout = timeout
+
+    def extract_from_url(self, url: str) -> Dict[str, Any]:
+        """
+        抓取并解析文章元数据
+        :param url: 微信文章链接
+        :return: 包含 title, nickname, user_name, biz, publish_time 等字典
+        """
+        clean_url = url.strip()
+        resp = self.session.get(clean_url, timeout=self.timeout)
+        resp.encoding = "utf-8"
+        html_content = resp.text
+
+        return self.extract_from_html(html_content, clean_url)
+
+    def extract_from_html(self, html_content: str, url: str = "") -> Dict[str, Any]:
+        """
+        从 HTML 源码中提取所有公众号和文章元数据
+        """
+        # 1. 标题
+        title = None
+        m_title = re.search(r'var\s+msg_title\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        if m_title:
+            title = m_title.group(1)
+        else:
+            m_og_title = re.search(r'<meta\s+property=[\'"]og:title[\'"]\s+content=[\'"]([^\'"]+)[\'"]', html_content)
+            if m_og_title:
+                title = m_og_title.group(1)
+            else:
+                m_tag = re.search(r'<title>([^<]+)</title>', html_content)
+                if m_tag:
+                    title = m_tag.group(1)
+
+        if title:
+            title = html.unescape(title).strip()
+
+        # 2. 公众号昵称 (nickname)
+        nickname = None
+        m_nick = re.search(r'var\s+nickname\s*=\s*htmlDecode\([\'"]([^\'"]+)[\'"]\)', html_content)
+        if m_nick:
+            nickname = m_nick.group(1)
+        else:
+            m_nick_meta = re.search(r'<meta\s+property=[\'"]og:article:author[\'"]\s+content=[\'"]([^\'"]+)[\'"]', html_content)
+            if m_nick_meta:
+                nickname = m_nick_meta.group(1)
+            else:
+                m_nick_profile = re.search(r'id=[\'"]profile_nickname[\'"][^>]*>([^<]+)<', html_content)
+                if m_nick_profile:
+                    nickname = m_nick_profile.group(1)
+
+        if nickname:
+            nickname = html.unescape(nickname).strip()
+
+        # 3. 公众号原始 ID (user_name: gh_xxxx)
+        user_name = None
+        m_username = re.search(r'var\s+user_name\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        if m_username:
+            user_name = m_username.group(1)
+
+        # 4. 公众号唯一标识 __biz
+        biz = None
+        m_biz = re.search(r'var\s+__biz\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        if m_biz:
+            biz = m_biz.group(1)
+        else:
+            # 尝试从 URL 或其他脚本中匹配 __biz
+            m_biz_url = re.search(r'__biz=([a-zA-Z0-9+=/]{8,})', url or "")
+            if not m_biz_url:
+                m_biz_url = re.search(r'__biz=([a-zA-Z0-9+=/]{8,})', html_content)
+            if m_biz_url:
+                biz = m_biz_url.group(1)
+
+        # 5. 发布时间
+        publish_time_str = None
+        timestamp = None
+        m_time = re.search(r'var\s+ct\s*=\s*[\'"]?(\d+)[\'"]?', html_content)
+        if not m_time:
+            m_time = re.search(r'var\s+publish_time\s*=\s*[\'"]?(\d+)[\'"]?', html_content)
+        if m_time:
+            timestamp = int(m_time.group(1))
+            publish_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+        # 6. 文章作者签名 (Author)
+        author = None
+        m_author = re.search(r'var\s+author\s*=\s*htmlDecode\([\'"]([^\'"]+)[\'"]\)', html_content)
+        if m_author:
+            author = html.unescape(m_author.group(1)).strip()
+
+        # 7. 摘要 (digest)
+        digest = None
+        m_digest = re.search(r'var\s+msg_desc\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        if m_digest:
+            digest = html.unescape(m_digest.group(1)).strip()
+        else:
+            m_og_desc = re.search(r'<meta\s+property=[\'"]og:description[\'"]\s+content=[\'"]([^\'"]+)[\'"]', html_content)
+            if m_og_desc:
+                digest = html.unescape(m_og_desc.group(1)).strip()
+
+        # 8. 话题/合集 ID (TOC album_id)
+        album_id = None
+        album_url = None
+        m_album = re.search(r'album[a-zA-Z0-9_]*[:=][\x27\x22]?(\d{15,})[\x27\x22]?', html_content)
+        if not m_album:
+            m_album = re.search(r'[\x27\x22]album_id[\x27\x22]\s*:\s*[\x27\x22]?(\d+)[\x27\x22]?', html_content)
+        if m_album:
+            album_id = m_album.group(1)
+            if biz:
+                album_url = f"https://mp.weixin.qq.com/mp/appmsgalbum?action=getalbum&__biz={biz}&album_id={album_id}"
+
+        return {
+            "title": title or "未知标题",
+            "nickname": nickname or "未知作者",
+            "user_name": user_name or "",
+            "biz": biz or "",
+            "publish_time": publish_time_str or "",
+            "timestamp": timestamp or 0,
+            "author": author or "",
+            "digest": digest or "",
+            "album_id": album_id or "",
+            "album_url": album_url or "",
+            "url": url,
+        }

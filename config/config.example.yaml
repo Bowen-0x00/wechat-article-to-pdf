@@ -1,0 +1,25 @@
+# 微信公众号历史文章抓取与PDF导出配置
+
+# 微信公众平台凭证 (用于获取作者所有历史文章列表)
+# 获取方法：
+# 1. 登录微信公众平台后台 https://mp.weixin.qq.com (普通个人订阅号即可，免费申请)
+# 2. 登录后从浏览器地址栏获取 token 参数，从请求头获取 Cookie
+# 3. 或者使用命令 `python cli.py login` 进行辅助交互配置
+wechat_mp:
+  token: ""
+  cookie: ""
+
+# PDF 导出配置
+pdf:
+  # Chrome 可执行文件路径 (留空则自动检测系统安装的 Chrome / Edge)
+  browser_path: ""
+  # 输出主目录
+  output_dir: "output"
+  # 是否移除页面的关注条、二维码、底部赞赏等无关元素
+  clean_layout: true
+  # 页面加载虚拟等待时间 (毫秒)，保证图片完全下载
+  virtual_time_budget: 8000
+  # 导出单篇超时时间 (秒)
+  timeout: 45
+  # 抓取间隔延迟 (秒)，避免触发反爬
+  request_delay: 2.0

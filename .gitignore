@@ -1,0 +1,30 @@
+# Secret configurations
+config/config.yaml
+*.key
+*.token
+
+# Generated PDF outputs & local article dumps
+output/
+!output/.gitkeep
+
+# Python caches & environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+venv/
+env/
+.env
+
+# Temporary artifacts
+temp/
+*.tmp
+*.temp
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
