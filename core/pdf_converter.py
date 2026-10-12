@@ -142,7 +142,40 @@ class WeChatPDFConverter:
             logger.warning("下载图片失败: %s - %s", img_url, e)
         return None
 
-    def prepare_clean_html(self, raw_html: str) -> str:
+    @staticmethod
+    def _is_valid_article_html(raw_html: str, resp_url: str = "") -> bool:
+        if not raw_html:
+            return False
+        if "wappoc_appmsgcaptcha" in resp_url or "secitptpage/verify" in raw_html:
+            return False
+        return (
+            'id="js_content"' in raw_html
+            or "id='js_content'" in raw_html
+            or "rich_media_content" in raw_html
+        )
+
+    def _fetch_article_html(self, url: str, max_retries: int = 3) -> str:
+        last_html = ""
+        for attempt in range(max_retries):
+            resp = self.session.get(url, timeout=20)
+            resp.encoding = "utf-8"
+            last_html = resp.text
+            if self._is_valid_article_html(last_html, resp.url):
+                return last_html
+            logger.warning("第 %d 次请求未获取到有效文章正文 (可能触发微信验证码拦截)，等待重试...", attempt + 1)
+            if attempt < max_retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                self.session = requests.Session()
+                self.session.headers.update({
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    )
+                })
+        raise RuntimeError("微信触发了环境异常/验证码拦截 (wappoc_appmsgcaptcha) 或文章正文不存在，无法导出有效内容，请稍后重试。")
+
+    def prepare_clean_html(self, raw_html: str, title: Optional[str] = None) -> str:
         """
         处理微信 HTML：
         1. 抓取所有图片转 Base64 嵌入（破除防盗链与懒加载）
@@ -216,30 +249,50 @@ class WeChatPDFConverter:
         if head:
             head.insert(0, meta_ref)
             head.append(css_soup)
+            if title:
+                title_tag = head.find("title")
+                if title_tag:
+                    title_tag.string = title
+                else:
+                    new_title = soup.new_tag("title")
+                    new_title.string = title
+                    head.insert(1, new_title)
         else:
             new_head = soup.new_tag("head")
             new_head.append(meta_ref)
+            if title:
+                new_title = soup.new_tag("title")
+                new_title.string = title
+                new_head.append(new_title)
             new_head.append(css_soup)
             if soup.html:
                 soup.html.insert(0, new_head)
-
         return str(soup)
 
-    def convert_url_to_pdf(self, url: str, output_path: str, title: Optional[str] = None) -> bool:
+    def convert_url_to_pdf(
+        self,
+        url: str,
+        output_path: str,
+        title: Optional[str] = None,
+        raw_html: Optional[str] = None
+    ) -> bool:
         """
         单篇文章 URL 导出为高质量 PDF
         :param url: 文章链接
         :param output_path: 目标 PDF 绝对或相对路径
-        :param title: 文章标题（用于日志）
+        :param title: 文章标题（用于日志及 PDF 标题元数据）
+        :param raw_html: 已抓取的 HTML 源码（传入可避免二次请求触发微信验证码拦截）
         :return: 是否导出成功
         """
         output_abs = os.path.abspath(output_path)
         os.makedirs(os.path.dirname(output_abs), exist_ok=True)
 
-        resp = self.session.get(url, timeout=20)
-        resp.encoding = "utf-8"
-        clean_html = self.prepare_clean_html(resp.text)
+        if raw_html and self._is_valid_article_html(raw_html):
+            html_text = raw_html
+        else:
+            html_text = self._fetch_article_html(url)
 
+        clean_html = self.prepare_clean_html(html_text, title=title)
         temp_fd, temp_html_path = tempfile.mkstemp(suffix=".html", prefix="wx_clean_")
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
@@ -263,8 +316,13 @@ class WeChatPDFConverter:
                 errors="ignore",
                 timeout=self.timeout
             )
-            if not os.path.exists(output_abs) or os.path.getsize(output_abs) == 0:
-                err_msg = res.stderr or "未知错误"
+            if not os.path.exists(output_abs) or os.path.getsize(output_abs) < 5120:
+                err_msg = res.stderr or "生成的 PDF 文件为空白或体积异常"
+                if os.path.exists(output_abs):
+                    try:
+                        os.remove(output_abs)
+                    except OSError:
+                        pass
                 raise RuntimeError(f"PDF 导出失败: {err_msg}")
 
             return True
@@ -310,8 +368,8 @@ class WeChatPDFConverter:
             pdf_filename = f"{idx:02d}_{date_prefix}{safe_title}.pdf"
             target_pdf = os.path.join(output_dir, pdf_filename)
 
-            # 已存在跳过
-            if os.path.exists(target_pdf) and os.path.getsize(target_pdf) > 1024:
+            # 已存在且非空白文件则跳过
+            if os.path.exists(target_pdf) and os.path.getsize(target_pdf) > 5120:
                 success_count += 1
                 details_list.append({"title": title, "status": "skipped", "path": target_pdf})
                 if progress_callback:

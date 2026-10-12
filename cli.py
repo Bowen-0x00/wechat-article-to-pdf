@@ -86,18 +86,22 @@ def cmd_info(args: argparse.Namespace) -> None:
     else:
         print("\n--- 微信文章与公众号元数据 ---")
         for k, v in info.items():
-            print(f"{k}: {v}")
+            if k != "raw_html":
+                print(f"{k}: {v}")
 
-def cmd_export_single(args: argparse.Namespace) -> None:
+def cmd_export_single(args: argparse.Namespace, pre_info: Optional[Dict[str, Any]] = None) -> None:
     """将单篇文章直接导出为高质量 PDF"""
     url = args.url.strip()
     cfg = load_config()
     browser_path = args.browser or cfg.get("pdf", {}).get("browser_path")
     raw_out = args.output_dir or cfg.get("pdf", {}).get("output_dir", "output")
     out_dir = raw_out if os.path.isabs(raw_out) else os.path.join(PROJECT_ROOT, raw_out)
-    extractor = ArticleExtractor()
-    log_info("正在获取文章标题...")
-    info = extractor.extract_from_url(url)
+    if pre_info is not None:
+        info = pre_info
+    else:
+        extractor = ArticleExtractor()
+        log_info("正在获取文章标题...")
+        info = extractor.extract_from_url(url)
     title = info.get("title") or "微信文章"
     nickname = info.get("nickname") or "公众号"
     date_prefix = (info.get("publish_time") or "")[:10]
@@ -112,7 +116,7 @@ def cmd_export_single(args: argparse.Namespace) -> None:
     converter = WeChatPDFConverter(browser_path=browser_path)
     t0 = time.time()
     try:
-        converter.convert_url_to_pdf(url, out_pdf, title=title)
+        converter.convert_url_to_pdf(url, out_pdf, title=title, raw_html=info.get("raw_html"))
         log_success(f"导出成功! ({round(time.time() - t0, 2)}s)")
         print(f"文件位置: {os.path.abspath(out_pdf)}")
     except Exception as e:
@@ -402,7 +406,7 @@ def cmd_auto(args: argparse.Namespace) -> None:
     else:
         log_info(f"该文章未包含内嵌 TOC 专栏，为您单独导出本篇文章为独立 PDF...")
         args.url = url
-        cmd_export_single(args)
+        cmd_export_single(args, pre_info=info)
         print("\n[提示] 该文章没有内嵌 TOC 话题合集。若该作者有专门的专题主页，可将合集链接复制后使用 `python cli.py album <合集链接>` 批量下载。")
 
 def cmd_config(args: argparse.Namespace) -> None:

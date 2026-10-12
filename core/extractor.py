@@ -23,19 +23,35 @@ class ArticleExtractor:
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.timeout = timeout
 
-    def extract_from_url(self, url: str) -> Dict[str, Any]:
+    @staticmethod
+    def is_captcha_or_invalid(html_content: str, resp_url: str = "") -> bool:
+        if "wappoc_appmsgcaptcha" in resp_url or "secitptpage/verify" in html_content:
+            return True
+        if 'id="js_content"' not in html_content and "id='js_content'" not in html_content and "rich_media_content" not in html_content:
+            return True
+        return False
+
+    def extract_from_url(self, url: str, max_retries: int = 3) -> Dict[str, Any]:
         """
         抓取并解析文章元数据
         :param url: 微信文章链接
-        :return: 包含 title, nickname, user_name, biz, publish_time 等字典
+        :param max_retries: 遇到验证码拦截时的最大重试次数
+        :return: 包含 title, nickname, user_name, biz, publish_time, raw_html 等字典
         """
         clean_url = url.strip()
-        resp = self.session.get(clean_url, timeout=self.timeout)
-        resp.encoding = "utf-8"
-        html_content = resp.text
+        html_content = ""
+        for attempt in range(max_retries):
+            resp = self.session.get(clean_url, timeout=self.timeout)
+            resp.encoding = "utf-8"
+            html_content = resp.text
+            if not self.is_captcha_or_invalid(html_content, resp.url):
+                break
+            if attempt < max_retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                self.session = requests.Session()
+                self.session.headers.update(self.DEFAULT_HEADERS)
 
         return self.extract_from_html(html_content, clean_url)
-
     def extract_from_html(self, html_content: str, url: str = "") -> Dict[str, Any]:
         """
         从 HTML 源码中提取所有公众号和文章元数据
@@ -142,4 +158,5 @@ class ArticleExtractor:
             "album_id": album_id or "",
             "album_url": album_url or "",
             "url": url,
+            "raw_html": html_content,
         }
