@@ -24,6 +24,7 @@ class WeChatAlbumCrawler:
 
     def __init__(self, timeout: int = 15):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.timeout = timeout
 

@@ -96,6 +96,7 @@ class WeChatPDFConverter:
         self.browser_path = self._resolve_browser_path(browser_path)
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -152,6 +153,8 @@ class WeChatPDFConverter:
             'id="js_content"' in raw_html
             or "id='js_content'" in raw_html
             or "rich_media_content" in raw_html
+            or "picture_page_info_list" in raw_html
+            or "window.cgiDataNew" in raw_html
         )
 
     def _fetch_article_html(self, url: str, max_retries: int = 3) -> str:
@@ -166,6 +169,7 @@ class WeChatPDFConverter:
             if attempt < max_retries - 1:
                 time.sleep(1.5 * (attempt + 1))
                 self.session = requests.Session()
+                self.session.trust_env = False
                 self.session.headers.update({
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -175,6 +179,54 @@ class WeChatPDFConverter:
                 })
         raise RuntimeError("微信触发了环境异常/验证码拦截 (wappoc_appmsgcaptcha) 或文章正文不存在，无法导出有效内容，请稍后重试。")
 
+    @staticmethod
+    def _decode_js_str(val: str) -> str:
+        if not val:
+            return ""
+        s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), val)
+        s = s.replace(r'\n', '\n').replace(r'\r', '').replace(r"\'", "'").replace(r'\"', '"')
+        return html.unescape(s).strip()
+
+    def _inject_picture_card_html(self, raw_html: str, fallback_title: Optional[str] = None) -> str:
+        """针对微信图文卡片/小绿书 (item_show_type=8, picture_page_info_list) 构建可打印正文 DOM"""
+        if (
+            'id="js_content"' in raw_html
+            or "id='js_content'" in raw_html
+            or "picture_page_info_list" not in raw_html
+        ):
+            return raw_html
+
+        m_title = re.search(r'\btitle\s*:\s*[\'"]([^\'"]+)[\'"]', raw_html)
+        card_title = self._decode_js_str(m_title.group(1)) if m_title else (fallback_title or "微信图文")
+        m_nick = re.search(r'\bnick_name\s*:\s*[\'"]([^\'"]+)[\'"]', raw_html)
+        nick = self._decode_js_str(m_nick.group(1)) if m_nick else ""
+        m_time = re.search(r'\bcreate_time\s*:\s*[\'"](\d{4}-\d{2}-\d{2}[^\'"]*)[\'"]', raw_html)
+        ctime = m_time.group(1).strip() if m_time else ""
+        m_desc = re.search(r'\bcontent_noencode\s*:\s*[\'"]([^\'"]+)[\'"]', raw_html)
+        desc = self._decode_js_str(m_desc.group(1)) if m_desc else ""
+
+        m_pic_block = re.search(r'picture_page_info_list\s*:\s*\[(.*?)\]\s*,\s*locationlist\s*:', raw_html, re.S)
+        if not m_pic_block:
+            m_pic_block = re.search(r'picture_page_info_list\s*:\s*\[(.*?)\]\s*,\s*[a-zA-Z0-9_]+\s*:\s*\[', raw_html, re.S)
+        pic_section = m_pic_block.group(1) if m_pic_block else raw_html
+        raw_urls = re.findall(r"cdn_url\s*:\s*['\"]([^'\"]+)['\"]\s*,\s*width\s*:", pic_section)
+        card_urls = [self._decode_js_str(u) for u in raw_urls if u]
+
+        desc_html = "".join(f"<p>{html.escape(line)}</p>" for line in desc.splitlines() if line.strip())
+        imgs_html = "\n".join(
+            f'<p style="text-align:center;margin:16px 0;"><img data-src="{html.escape(u)}" style="max-width:100%;height:auto;" /></p>'
+            for u in card_urls
+        )
+        meta_html = f'<div style="color:#888;font-size:14px;margin-bottom:18px;">{html.escape(nick)} &nbsp; {html.escape(ctime)}</div>'
+        injected_body = (
+            f'<div id="img-content" class="rich_media_wrp">'
+            f'<h1 class="rich_media_title" id="activity-name">{html.escape(card_title)}</h1>'
+            f'{meta_html}'
+            f'<div class="rich_media_content" id="js_content">{desc_html}{imgs_html}</div>'
+            f'</div>'
+        )
+        return f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{injected_body}</body></html>"
+
     def prepare_clean_html(self, raw_html: str, title: Optional[str] = None) -> str:
         """
         处理微信 HTML：
@@ -183,6 +235,7 @@ class WeChatPDFConverter:
         3. 剔除所有无关 JS 与无用 preload
         4. 解除正文 visibility:hidden，注入打印美化 CSS
         """
+        raw_html = self._inject_picture_card_html(raw_html, fallback_title=title)
         # 1. 提取所有图片 URL
         img_urls = list(set(re.findall(r'<img[^>]+data-src=[\x27\x22]([^\x27\x22]+)[\x27\x22]', raw_html)))
         
@@ -303,6 +356,7 @@ class WeChatPDFConverter:
                 "--headless=new",
                 "--disable-gpu",
                 "--no-sandbox",
+                "--no-proxy-server",
                 "--no-pdf-header-footer",
                 f"--print-to-pdf={output_abs}",
                 temp_html_path

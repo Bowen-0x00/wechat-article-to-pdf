@@ -44,6 +44,7 @@ class WeChatProfileScraper:
         self.uin = uin
         self.delay = delay
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.session.headers["Cookie"] = self.cookie
 

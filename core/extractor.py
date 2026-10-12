@@ -20,6 +20,7 @@ class ArticleExtractor:
 
     def __init__(self, timeout: int = 15):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update(self.DEFAULT_HEADERS)
         self.timeout = timeout
 
@@ -27,7 +28,13 @@ class ArticleExtractor:
     def is_captcha_or_invalid(html_content: str, resp_url: str = "") -> bool:
         if "wappoc_appmsgcaptcha" in resp_url or "secitptpage/verify" in html_content:
             return True
-        if 'id="js_content"' not in html_content and "id='js_content'" not in html_content and "rich_media_content" not in html_content:
+        if (
+            'id="js_content"' not in html_content
+            and "id='js_content'" not in html_content
+            and "rich_media_content" not in html_content
+            and "picture_page_info_list" not in html_content
+            and "window.cgiDataNew" not in html_content
+        ):
             return True
         return False
 
@@ -49,9 +56,18 @@ class ArticleExtractor:
             if attempt < max_retries - 1:
                 time.sleep(1.5 * (attempt + 1))
                 self.session = requests.Session()
+                self.session.trust_env = False
                 self.session.headers.update(self.DEFAULT_HEADERS)
 
         return self.extract_from_html(html_content, clean_url)
+
+    @staticmethod
+    def _decode_js_str(val: str) -> str:
+        if not val:
+            return ""
+        s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), val)
+        s = s.replace(r'\n', '\n').replace(r'\r', '').replace(r"\'", "'").replace(r'\"', '"')
+        return html.unescape(s).strip()
     def extract_from_html(self, html_content: str, url: str = "") -> Dict[str, Any]:
         """
         从 HTML 源码中提取所有公众号和文章元数据
@@ -86,19 +102,23 @@ class ArticleExtractor:
                 m_nick_profile = re.search(r'id=[\'"]profile_nickname[\'"][^>]*>([^<]+)<', html_content)
                 if m_nick_profile:
                     nickname = m_nick_profile.group(1)
+                else:
+                    m_nick_cgi = re.search(r'\bnick_name\s*:\s*[\'"]([^\'"]+)[\'"]', html_content)
+                    if m_nick_cgi:
+                        nickname = self._decode_js_str(m_nick_cgi.group(1))
 
         if nickname:
             nickname = html.unescape(nickname).strip()
 
         # 3. 公众号原始 ID (user_name: gh_xxxx)
         user_name = None
-        m_username = re.search(r'var\s+user_name\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        m_username = re.search(r'(?:var\s+user_name\s*=|\buser_name\s*:)\s*[\'"](gh_[^\'"]+)[\'"]', html_content)
         if m_username:
             user_name = m_username.group(1)
 
         # 4. 公众号唯一标识 __biz
         biz = None
-        m_biz = re.search(r'var\s+__biz\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        m_biz = re.search(r'(?:var\s+__biz\s*=|\bbizuin\s*:)\s*[\'"]([^\'"]+)[\'"]', html_content)
         if m_biz:
             biz = m_biz.group(1)
         else:
@@ -112,12 +132,14 @@ class ArticleExtractor:
         # 5. 发布时间
         publish_time_str = None
         timestamp = None
-        m_time = re.search(r'var\s+ct\s*=\s*[\'"]?(\d+)[\'"]?', html_content)
-        if not m_time:
-            m_time = re.search(r'var\s+publish_time\s*=\s*[\'"]?(\d+)[\'"]?', html_content)
+        m_time = re.search(r'(?:var\s+ct\s*=|var\s+publish_time\s*=|\bori_create_time\s*:)\s*[\'"]?(\d{9,10})[\'"]?', html_content)
         if m_time:
             timestamp = int(m_time.group(1))
             publish_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        else:
+            m_ctime_str = re.search(r'\bcreate_time\s*:\s*[\'"](\d{4}-\d{2}-\d{2}[^\'"]*)[\'"]', html_content)
+            if m_ctime_str:
+                publish_time_str = m_ctime_str.group(1).strip()
 
         # 6. 文章作者签名 (Author)
         author = None
@@ -127,13 +149,13 @@ class ArticleExtractor:
 
         # 7. 摘要 (digest)
         digest = None
-        m_digest = re.search(r'var\s+msg_desc\s*=\s*[\'"]([^\'"]+)[\'"]', html_content)
+        m_digest = re.search(r'(?:var\s+msg_desc\s*=|\bcontent_noencode\s*:)\s*[\'"]([^\'"]+)[\'"]', html_content)
         if m_digest:
-            digest = html.unescape(m_digest.group(1)).strip()
+            digest = self._decode_js_str(m_digest.group(1))
         else:
             m_og_desc = re.search(r'<meta\s+property=[\'"]og:description[\'"]\s+content=[\'"]([^\'"]+)[\'"]', html_content)
             if m_og_desc:
-                digest = html.unescape(m_og_desc.group(1)).strip()
+                digest = self._decode_js_str(m_og_desc.group(1))
 
         # 8. 话题/合集 ID (TOC album_id)
         album_id = None
